@@ -1,74 +1,57 @@
 import json
 import boto3
 import logging
+from typing import Any, Dict
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Define the email addresses to send the email from
-from_email = "mgutierrez@jsr-nahq.com"
+FROM_EMAIL = "mgutierrez@jsr-nahq.com"
 
 # Define the email addresses to send the email to
-to_email_list = ["jdavidson@jsr-nahq.com", "mgutierrez@jsr-nahq.com", "icavalcante@jsr-nahq.com"]
+TO_EMAIL_LIST = ["jdavidson@jsr-nahq.com", "mgutierrez@jsr-nahq.com", "icavalcante@jsr-nahq.com"]
+
+# Email subject
+EMAIL_SUBJECT = "New Instance Launched In Dev Account"
 
 # Initialize the SES client
 client = boto3.client('ses')
 
-# Helper function to pull the creator of the instance from the event
-def pull_creator(event):
+def get_event_detail(event: Dict[str, Any], keys: list, default: str = "Unknown") -> str:
+    """Helper function to safely extract nested values from the event."""
     try:
-        creator = event['detail']['userIdentity']['arn']
-        creator = creator.split('/')
-        creator = creator[2]
+        value = event
+        for key in keys:
+            value = value[key]
+        return value
     except KeyError:
-        creator = "Unknown"
-    return creator
+        return default
 
-# Helper function to pull the instance type from the event
-def pull_instance_type(event):
-    try:
-        instance_type = event['detail']['requestParameters']['instanceType']
-    except KeyError:
-        instance_type = "Unknown Instance Type"
-    return instance_type
+def pull_creator(event: Dict[str, Any]) -> str:
+    """Extract the creator's ARN from the event."""
+    return get_event_detail(event, ['detail', 'userIdentity', 'arn']).split('/')[-1]
 
-# Helper function to pull the instance ID from the event
-def pull_instance_id(event):
-    try:
-        instance_id = event['detail']['responseElements']['instancesSet']['items'][0]['instanceId']
-    except KeyError:
-        instance_id = "Unknown Instance ID"
-    return instance_id
+def pull_instance_type(event: Dict[str, Any]) -> str:
+    """Extract the instance type from the event."""
+    return get_event_detail(event, ['detail', 'requestParameters', 'instanceType'])
 
-# Helper function to pull the instance name from the event
-def pull_instance_name(event):
-    try:
-        instance_name = event['detail']['responseElements']['instancesSet']['items'][0]['tagSet']['items'][0]['value']
-    except KeyError:
-        instance_name = "Unknown Instance Name"
-    return instance_name
+def pull_instance_id(event: Dict[str, Any]) -> str:
+    """Extract the instance ID from the event."""
+    return get_event_detail(event, ['detail', 'responseElements', 'instancesSet', 'items', 0, 'instanceId'])
 
-# Lambda function handler
-def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
+def pull_instance_name(event: Dict[str, Any]) -> str:
+    """Extract the instance name from the event."""
+    return get_event_detail(event, ['detail', 'responseElements', 'instancesSet', 'items', 0, 'tagSet', 'items', 0, 'value'])
 
-    # Pull the required data from the event
-    creator = pull_creator(event)
-    instance_type = pull_instance_type(event)
-    instance_id = pull_instance_id(event)
-    instance_name = pull_instance_name(event)
+def pull_iam_role(event: Dict[str, Any]) -> str:
+    """Extract the IAM role from the event."""
+    return get_event_detail(event, ['detail', 'responseElements', 'instancesSet', 'items', 0, 'iamInstanceProfile', 'arn']).split('/')[-1]
 
-    # Check if the creator is 1738272163419127224 which is the EKS service account
-    if creator == "1738272163419127224":
-        logger.info("Instance launched by EKS, no email sent.")
-        return {
-            'statusCode': 200,
-            'body': json.dumps('Instance launched by EKS, no email sent.')
-        }
-
-    # Build the dynamic HTML content
-    html_content = f"""
+def create_html_content(creator: str, instance_type: str, instance_id: str, instance_name: str, instance_role: str) -> str:
+    """Create the HTML content for the email."""
+    return f"""
     <html>
     <head>
         <style>
@@ -106,6 +89,7 @@ def lambda_handler(event, context):
                     <li><strong>Instance Type:</strong> {instance_type}</li>
                     <li><strong>Instance ID:</strong> {instance_id}</li>
                     <li><strong>Instance Name:</strong> {instance_name}</li>
+                    <li><strong>IAM Role:</strong> {instance_role}</li>
                 </ul>
             </div>
         </div>
@@ -113,16 +97,17 @@ def lambda_handler(event, context):
     </html>
     """
 
+def send_email(html_content: str) -> bool:
+    """Send the email with the given HTML content."""
     try:
-        # Send the email with dynamic HTML content
         response = client.send_email(
-            Source=from_email,
+            Source=FROM_EMAIL,
             Destination={
-                'ToAddresses': to_email_list
+                'ToAddresses': TO_EMAIL_LIST
             },
             Message={
                 'Subject': {
-                    'Data': 'New Instance Launched In Dev Account',
+                    'Data': EMAIL_SUBJECT,
                     'Charset': 'UTF-8'
                 },
                 'Body': {
@@ -133,17 +118,36 @@ def lambda_handler(event, context):
                 }
             },
             ReplyToAddresses=[
-                from_email,
+                FROM_EMAIL,
             ])
         logger.info(f"Email sent successfully: {response}")
+        return True
     except Exception as e:
         logger.error(f"Error sending email: {e}")
+        return False
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Lambda function handler."""
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    # Pull the required data from the event
+    creator = pull_creator(event)
+    instance_type = pull_instance_type(event)
+    instance_id = pull_instance_id(event)
+    instance_name = pull_instance_name(event)
+    instance_role = pull_iam_role(event)
+
+    # Build the dynamic HTML content
+    html_content = create_html_content(creator, instance_type, instance_id, instance_name, instance_role)
+
+    # Send the email
+    if send_email(html_content):
+        return {
+            'statusCode': 200,
+            'body': json.dumps('Email sent successfully!')
+        }
+    else:
         return {
             'statusCode': 500,
-            'body': json.dumps(f"Error sending email: {e}")
+            'body': json.dumps('Error sending email.')
         }
-
-    return {
-        'statusCode': 200,
-        'body': json.dumps('Email sent successfully!')
-    }
